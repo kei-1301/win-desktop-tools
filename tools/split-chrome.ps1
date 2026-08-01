@@ -327,20 +327,31 @@ if (-not $ProfileDir) {
     $alreadyServing = @($mainProfile | Where-Object { $_.CommandLine -like "*--remote-debugging-port=$Port*" })
 
     if ($mainProfile.Count -gt 0 -and $alreadyServing.Count -eq 0) {
-        throw @"
-Chrome is already running, and the debugging port cannot be attached to a
-running browser - auto-reload would be impossible. Close every Chrome window,
-then run this again (reopen your tabs afterwards with Ctrl+Shift+T).
-
-To keep Chrome open instead, use a separate profile. Note it carries none of
-your logins, so pages like Gmail show a sign-in screen until you log in once:
-
-    -ProfileDir "`$env:LOCALAPPDATA\ChromeDashboard"
-"@
+        # Write-Host + exit, not throw: this is expected user guidance, and a
+        # throw buries it under a stack trace that repeats the whole message.
+        Write-Host ''
+        Write-Host 'Chrome is already running.' -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host '  The debugging port cannot be attached to a browser that is already open,'
+        Write-Host '  so auto-reload would not work. Choose one:'
+        Write-Host ''
+        Write-Host '  1) Close every Chrome window, then run this again.' -ForegroundColor Cyan
+        Write-Host '     Your tabs come back with Ctrl+Shift+T. Pages you are signed into'
+        Write-Host '     (Gmail and friends) open as usual.'
+        Write-Host ''
+        Write-Host '  2) Keep Chrome open and use a separate profile:' -ForegroundColor Cyan
+        Write-Host "     -ProfileDir `"`$env:LOCALAPPDATA\ChromeDashboard`""
+        Write-Host '     Sign in once in that window; the profile remembers it afterwards.'
+        Write-Host ''
+        exit 1
     }
 
     if ($alreadyServing.Count -eq 0 -and (Test-CdpPort -Port $Port)) {
-        throw "Port $Port is already used by another browser instance. Pick another with -Port, or stop that instance."
+        Write-Host ''
+        Write-Host "Port $Port is already used by another browser instance." -ForegroundColor Yellow
+        Write-Host '  Pick a free one with -Port, or stop that instance.'
+        Write-Host ''
+        exit 1
     }
 }
 
