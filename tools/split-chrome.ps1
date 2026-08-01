@@ -13,18 +13,29 @@
 #     which needs no focus at all -- and works even when the page's own
 #     auto-refresh script is broken.
 #
-#   * CDP requires --remote-debugging-port, which cannot be attached to an
-#     existing session. Hence the dedicated profile directory: sites needing a
-#     login must be signed into once, after which the profile keeps the session.
+#   * CDP requires --remote-debugging-port, and the flag is IGNORED when Chrome
+#     is already running (measured: the port never opens). So by default this
+#     runs against your normal Chrome profile and asks you to close Chrome
+#     first -- that way pages you are signed into (Gmail and friends) open as
+#     usual. Pass -ProfileDir to use a separate profile instead, which can be
+#     started without closing Chrome but carries no logins of its own.
+#
+#   * Chrome is never closed automatically: killing it loses the session, and
+#     --restore-last-session did not bring the tabs back in testing, whether
+#     the browser was killed or closed gracefully. Reopen tabs with Ctrl+Shift+T.
 #
 # The debugging port listens on 127.0.0.1 only, but note that any local process
-# can drive this browser through it while the script runs. Use a port you are
-# not exposing, and keep this profile separate from your main browsing.
+# can drive this browser through it while the script runs.
+#
+# Progress output is silent by default; pass -Verbose to see placement and each
+# reload.
 #
 # Usage:
 #   .\split-chrome.ps1 -Left https://a.example -Right https://b.example
 #   .\split-chrome.ps1 -Left ... -Right ... -IntervalMinutes 10 -CoverTaskbar
+#   .\split-chrome.ps1 -Left ... -Right ... -ProfileDir "$env:LOCALAPPDATA\ChromeDashboard"
 
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Left,
     [Parameter(Mandatory = $true)][string]$Right,
@@ -32,7 +43,13 @@ param(
     # Extend windows over the taskbar strip (pair with taskbar auto-hide).
     [switch]$CoverTaskbar,
     [int]$Port = 9223,
-    [string]$ProfileDir = "$env:LOCALAPPDATA\ChromeDashboard"
+    # Empty means the normal Chrome profile (with your logins). Set a path to
+    # use an isolated profile that can start while Chrome is running.
+    [string]$ProfileDir = '',
+    # Which profile inside the normal Chrome data dir to open, e.g. "Profile 1".
+    # Empty lets Chrome pick the one it used last. Check yours at chrome://version
+    # under "Profile Path". Ignored when -ProfileDir is set.
+    [string]$ChromeProfile = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -111,10 +128,22 @@ public class ChromeWin {
 }
 '@
 
+function Test-CdpPort {
+    param([int]$Port)
+    try {
+        # -Verbose:$false so -Verbose on the script shows only our own progress,
+        # not the HTTP chatter of every poll.
+        Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/version" -TimeoutSec 2 -Verbose:$false | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Get-CdpPages {
     param([int]$Port, [int]$TimeoutSec = 3)
     try {
-        $all = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json" -TimeoutSec $TimeoutSec
+        $all = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json" -TimeoutSec $TimeoutSec -Verbose:$false
         return @($all | Where-Object { $_.type -eq 'page' })
     } catch {
         return @()
@@ -184,6 +213,35 @@ function Wait-NewCdpPage {
     throw 'Timed out waiting for a new CDP target'
 }
 
+# Using the normal profile means the debugging port has to be opened by the
+# browser we start ourselves, and Chrome silently drops the flag when an
+# instance is already up. Decide from the running processes rather than from the
+# port alone: an open port may belong to a different profile entirely, in which
+# case starting here would wait forever for a target that never appears.
+if (-not $ProfileDir) {
+    $browsers = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -notlike '*--type=*' })
+    $mainProfile = @($browsers | Where-Object { $_.CommandLine -notlike '*--user-data-dir=*' })
+    $alreadyServing = @($mainProfile | Where-Object { $_.CommandLine -like "*--remote-debugging-port=$Port*" })
+
+    if ($mainProfile.Count -gt 0 -and $alreadyServing.Count -eq 0) {
+        throw @"
+Chrome is already running, and the debugging port cannot be attached to a
+running browser - auto-reload would be impossible. Close every Chrome window,
+then run this again (reopen your tabs afterwards with Ctrl+Shift+T).
+
+To keep Chrome open instead, use a separate profile. Note it carries none of
+your logins, so pages like Gmail show a sign-in screen until you log in once:
+
+    -ProfileDir "`$env:LOCALAPPDATA\ChromeDashboard"
+"@
+    }
+
+    if ($alreadyServing.Count -eq 0 -and (Test-CdpPort -Port $Port)) {
+        throw "Port $Port is already used by another browser instance. Pick another with -Port, or stop that instance."
+    }
+}
+
 Add-Type -AssemblyName System.Windows.Forms
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen
 $area = if ($CoverTaskbar) { $screen.Bounds } else { $screen.WorkingArea }
@@ -205,8 +263,11 @@ foreach ($pane in $panes) {
     # while the window sits in the background, which Chrome otherwise slows to a
     # crawl or freezes. Reloads here do not depend on them -- CDP works either
     # way -- but they stop the page's built-in auto-refresh from stalling.
-    $chromeArgs = @(
-        "--user-data-dir=$ProfileDir"
+    $chromeArgs = @()
+    # No --user-data-dir at all means the normal profile, logins included.
+    if ($ProfileDir) { $chromeArgs += "--user-data-dir=$ProfileDir" }
+    elseif ($ChromeProfile) { $chromeArgs += "--profile-directory=$ChromeProfile" }
+    $chromeArgs += @(
         "--remote-debugging-port=$Port"
         '--no-first-run'
         '--no-default-browser-check'
@@ -223,28 +284,28 @@ foreach ($pane in $panes) {
     $page = Wait-NewCdpPage -BeforeIds $pageIdsBefore -Port $Port -ExpectUrl $pane.Url
     $tracked += @{ Name = $pane.Name; Url = $pane.Url; TargetId = $page.id }
 
-    Write-Host ("{0,-6} placed at {1},{2} {3}x{4}" -f $pane.Name, $pane.X, $area.Y, $halfWidth, $area.Height)
+    Write-Verbose ("{0,-6} placed at {1},{2} {3}x{4}" -f $pane.Name, $pane.X, $area.Y, $halfWidth, $area.Height)
 }
 
-Write-Host ("reloading every {0} min - press Ctrl+C to stop" -f $IntervalMinutes)
+Write-Verbose ("reloading every {0} min - press Ctrl+C to stop" -f $IntervalMinutes)
 
 while ($true) {
     Start-Sleep -Seconds ($IntervalMinutes * 60)
 
     $live = @(Get-CdpPages -Port $Port | ForEach-Object { $_.id })
     if ($live.Count -eq 0) {
-        Write-Host 'browser is gone - stopping'
+        Write-Verbose 'browser is gone - stopping'
         break
     }
 
     foreach ($pane in $tracked) {
         if ($live -notcontains $pane.TargetId) {
-            Write-Warning "$($pane.Name) window was closed - skipping"
+            Write-Verbose "$($pane.Name) window was closed - skipping"
             continue
         }
         $stamp = (Get-Date).ToString('HH:mm:ss')
         if (Invoke-CdpReload -TargetId $pane.TargetId -Port $Port) {
-            Write-Host "$stamp reloaded $($pane.Name)"
+            Write-Verbose "$stamp reloaded $($pane.Name)"
         }
     }
 }

@@ -20,9 +20,33 @@
 | `-IntervalMinutes` | `30` | 自動リロードの間隔（分） |
 | `-CoverTaskbar` | off | タスクバー領域まで使う。Windows 側の「タスクバーを自動的に隠す」と併用する |
 | `-Port` | `9223` | DevTools のデバッグポート |
-| `-ProfileDir` | `%LOCALAPPDATA%\ChromeDashboard` | 専用 Chrome プロファイルの場所 |
+| `-ChromeProfile` | 空 | 開くプロファイル（例 `"Profile 1"`）。空なら Chrome が最後に使ったものを開く |
+| `-ProfileDir` | 空 | 指定すると専用プロファイルを使う（後述）。空＝いつもの Chrome |
+| `-Verbose` | off | 配置とリロードの経過を表示する。既定では何も出さない |
 
 停止は `Ctrl+C`。
+
+### 実行前に Chrome を閉じる必要がある
+
+既定では**いつもの Chrome プロファイル**で開く。ログイン済みの状態なので Gmail などもそのまま表示できる。ただし自動リロードに使う DevTools のデバッグポートは、**すでに起動している Chrome には後から付けられない**（実測: フラグが黙って無視されポートが開かない）。
+
+そのため、実行前に Chrome のウィンドウをすべて閉じておく。閉じ忘れている場合はブラウザを起動せずエラーで止まるので、閉じてから実行し直せばよい。閉じたタブは起動後に `Ctrl+Shift+T` で戻せる。
+
+スクリプトが起動した Chrome は普通の Chrome として使える。別ウィンドウを開いても構わない。
+
+### Chrome を閉じたくない場合
+
+`-ProfileDir` を指定すると独立したプロファイルで起動するので、いつもの Chrome を開いたまま使える。
+
+```powershell
+.\split-chrome.ps1 -Left "https://a.example" -Right "https://b.example" -ProfileDir "$env:LOCALAPPDATA\ChromeDashboard"
+```
+
+ただしこのプロファイルには**ログイン情報が無い**。Gmail のようなページはサインイン画面や検索結果に飛ぶため、初回だけそのウィンドウでログインする。以降はプロファイルに残る。
+
+### プロファイルの確認方法
+
+`-ChromeProfile` に何を渡すか分からないときは、いつもの Chrome で `chrome://version` を開き「プロフィール パス」の末尾を見る。`...\User Data\Profile 1` なら `-ChromeProfile "Profile 1"`。
 
 ### ショートカットから起動する
 
