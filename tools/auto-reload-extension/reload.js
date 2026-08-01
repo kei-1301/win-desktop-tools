@@ -166,3 +166,16 @@ function step() {
 setInterval(check, CHECK_INTERVAL_MS);
 
 if (SCROLL_ENABLED) setInterval(step, SCROLL_INTERVAL_MS);
+
+// One diagnostic line, after the layout has settled. Without it there is no way
+// to tell "the extension never ran" (matches did not cover this URL) apart from
+// "it ran but the page is not tall enough to scroll" -- the two look identical
+// from the outside.
+setTimeout(function () {
+  console.log(
+    "[auto-reload] active" +
+      " | url=" + location.href +
+      " | scrollable=" + maxScrollTop() + "px" +
+      " | autoScroll=" + (SCROLL_ENABLED ? "on" : "off")
+  );
+}, 1500);
