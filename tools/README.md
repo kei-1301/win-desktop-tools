@@ -1,0 +1,93 @@
+# tools
+
+各スクリプトの使い方と、実装上の注意点。
+
+---
+
+## split-chrome.ps1
+
+2 つの URL を**タブバーもアドレスバーも無い**ウィンドウで開き、画面の左右に並べて、一定間隔で自動リロードする。掲示用ダッシュボードや常時表示モニタ向け。
+
+```powershell
+.\split-chrome.ps1 -Left "https://a.example" -Right "https://b.example"
+```
+
+### オプション
+
+| オプション | 既定値 | 説明 |
+|---|---|---|
+| `-Left` / `-Right` | (必須) | 左右それぞれに表示する URL |
+| `-IntervalMinutes` | `30` | 自動リロードの間隔（分） |
+| `-CoverTaskbar` | off | タスクバー領域まで使う。Windows 側の「タスクバーを自動的に隠す」と併用する |
+| `-Port` | `9223` | DevTools のデバッグポート |
+| `-ProfileDir` | `%LOCALAPPDATA%\ChromeDashboard` | 専用 Chrome プロファイルの場所 |
+
+停止は `Ctrl+C`。
+
+### ショートカットから起動する
+
+デスクトップのショートカットのリンク先を次のようにする。ウィンドウを出さずに常駐する。
+
+```
+powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\path\to\tools\split-chrome.ps1" -Left "https://a.example" -Right "https://b.example"
+```
+
+### 使う前に知っておくこと
+
+**専用プロファイルで起動する。** DevTools のデバッグポートは起動済みの Chrome に後から付けられないため、`-ProfileDir` に独立したプロファイルを作る。ログインが必要なページは初回だけ手動でログインすれば、以降はプロファイルに残る。普段使いの Chrome とはブックマークも拡張機能も共有しない。
+
+**デバッグポートが開く。** `127.0.0.1` のみのバインドなので外部からは接続できないが、同じ PC 上の他プロセスはこのブラウザを操作できる。スクリプトの実行中だけ開く。
+
+---
+
+## reload-now.ps1
+
+`split-chrome.ps1` が開いているページを、間隔を待たずに今すぐリロードする。別のウィンドウから実行する。
+
+```powershell
+.\reload-now.ps1                      # 全ページ
+.\reload-now.ps1 -Match 'example.com' # URL に部分一致するものだけ
+.\reload-now.ps1 -Port 9223           # ポートを変えて起動している場合
+```
+
+`split-chrome.ps1` が動いていない（＝デバッグポートが開いていない）ときはエラーで終わる。
+
+---
+
+## 実装メモ
+
+素直に書くと動かない箇所があり、いずれも実測して回避している。同じ罠を踏まないための記録。
+
+### `--window-position` / `--window-size` は当てにできない
+
+Chrome が既に起動していると、新しい起動は既存のブラウザセッションに委譲され（"既存のブラウザ セッションで開いています"）、ジオメトリ指定が捨てられる。実測では 2 つとも `X=10 Y=10 W=1050 H=893` に開いた。そのため起動後に `SetWindowPos` で配置している。
+
+### F5 のキー送信は背面ウィンドウに効かない
+
+`PostMessage(WM_KEYDOWN, VK_F5)` は前面のウィンドウならリロードできるが、背面では Chromium が無視する（実測: タイトルのタイムスタンプが変化しない）。定期リロードをキー送信でやると毎回フォーカスを奪うことになるため、DevTools Protocol の `Page.reload` を使っている。フォーカス不要で、ページ側の自動更新スクリプトが動いていなくても確実にリロードできる。
+
+### Chrome の翻訳バブルは「本物のウィンドウ」に見える
+
+「このページを翻訳しますか？」のバブルもクラス名が `Chrome_WidgetWin_1` でタイトルを持つため、新規ウィンドウ検出がバブルを掴んで画面半分に引き伸ばす事故が起きた。次の違いで除外している。
+
+| | owner | WS_CAPTION | WS_EX_TOOLWINDOW |
+|---|---|---|---|
+| 本物のウィンドウ | 0 | あり | なし |
+| 翻訳バブル | 非 0 | なし | あり |
+
+### `Invoke-RestMethod` を直接パイプすると JSON 配列が展開されない
+
+`Object[]` 1 個としてパイプに流れるため、`Where-Object` のフィルタが黙って無効化される。いったん変数に代入してからパイプすること。
+
+```powershell
+# 誤り: count=1（配列全体が 1 要素として流れる）
+@(Invoke-RestMethod $url | Where-Object { $_.type -eq 'page' })
+
+# 正しい: count=2
+$response = Invoke-RestMethod $url
+@($response | Where-Object { $_.type -eq 'page' })
+```
+
+### 背面ウィンドウでは JS タイマーが間引かれる
+
+ページ自身の `setInterval` による自動更新が止まる原因になる。`--disable-background-timer-throttling` ほか 2 つのフラグを付けて起動している。ページ側の自動更新が効かない場合はこれを疑うとよい。

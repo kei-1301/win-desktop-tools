@@ -1,73 +1,54 @@
 # win-desktop-tools
 
-Windows デスクトップ操作まわりの PowerShell スクリプト置き場。
+Windows のデスクトップ操作まわりで使っている PowerShell スクリプト置き場。別の PC へ持ち出しやすいよう public にしている。
 
-## split-chrome.ps1
+## 収録ツール
 
-2 つの URL を**タブバーもアドレスバーも無い**ウィンドウで開き、画面の左右に並べて、一定間隔で自動リロードする。掲示用ダッシュボードや常時表示モニタ向け。
+| ツール | 概要 |
+|---|---|
+| [`tools/split-chrome.ps1`](tools/) | 2 つの URL をタブバー無しのウィンドウで左右に並べ、一定間隔で自動リロードする |
+| [`tools/reload-now.ps1`](tools/) | 上で開いたページを、間隔を待たずに即座にリロードする |
 
-```powershell
-.\split-chrome.ps1 -Left "https://a.example" -Right "https://b.example"
-```
+使い方とオプションは [tools/README.md](tools/README.md) にまとめてある。
 
-| オプション | 既定値 | 説明 |
-|---|---|---|
-| `-Left` / `-Right` | (必須) | 左右それぞれに表示する URL |
-| `-IntervalMinutes` | `30` | 自動リロードの間隔（分） |
-| `-CoverTaskbar` | off | タスクバー領域まで使う。Windows 側の「タスクバーを自動的に隠す」と併用する |
-| `-Port` | `9223` | DevTools のデバッグポート |
-| `-ProfileDir` | `%LOCALAPPDATA%\ChromeDashboard` | 専用 Chrome プロファイルの場所 |
-
-停止は `Ctrl+C`。
-
-デスクトップのショートカットから起動する場合はリンク先を次のようにする。
-
-```
-powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\path\to\split-chrome.ps1" -Left "https://a.example" -Right "https://b.example"
-```
-
-## reload-now.ps1
-
-`split-chrome.ps1` が開いているページを、間隔を待たずに今すぐリロードする。
+## 取得
 
 ```powershell
-.\reload-now.ps1                      # 全ページ
-.\reload-now.ps1 -Match 'example.com' # URL に部分一致するものだけ
+git clone https://github.com/kei-1301/win-desktop-tools.git
+```
+
+1 ファイルだけ欲しいとき:
+
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/kei-1301/win-desktop-tools/main/tools/split-chrome.ps1" -OutFile split-chrome.ps1
 ```
 
 ## 動作要件
 
 - Windows / Windows PowerShell 5.1 以降
-- Google Chrome
+- ツールによって追加要件あり（Chrome など）。各ツールの説明を参照
 
-## 使う前に知っておくこと
+## 実行ポリシー
 
-**専用プロファイルで起動する。** DevTools のデバッグポートは起動済みの Chrome に後から付けられないため、`-ProfileDir` に独立したプロファイルを作る。ログインが必要なページは初回だけ手動でログインすれば、以降はプロファイルに残る。普段使いの Chrome とはブックマークも拡張機能も共有しない。
-
-**デバッグポートが開く。** `127.0.0.1` のみのバインドなので外部からは接続できないが、同じ PC 上の他プロセスはこのブラウザを操作できる。スクリプトの実行中だけ開く。
-
-## 実装メモ
-
-素直に書くと動かない箇所があり、いずれも実測して回避している。
-
-**`--window-position` / `--window-size` は当てにできない。** Chrome が既に起動していると新しい起動は既存セッションに委譲され、ジオメトリ指定が捨てられる。そのため起動後に `SetWindowPos` で配置している。
-
-**F5 のキー送信は背面ウィンドウに効かない。** `PostMessage(WM_KEYDOWN, VK_F5)` は前面のウィンドウならリロードできるが、背面では Chromium が無視する。定期リロードをキー送信でやると毎回フォーカスを奪うことになるため、DevTools Protocol の `Page.reload` を使っている。こちらはフォーカス不要で、ページ側の自動更新スクリプトが動いていなくても確実にリロードできる。
-
-**Chrome の翻訳バブルは「本物のウィンドウ」に見える。** クラス名は `Chrome_WidgetWin_1` でタイトルも持つため、新規ウィンドウ検出がバブルを掴んで画面半分に引き伸ばす事故が起きた。オーナーの有無・`WS_CAPTION`・`WS_EX_TOOLWINDOW` で除外している。
-
-**`Invoke-RestMethod` を直接パイプすると JSON 配列が展開されない。** `Object[]` 1 個としてパイプに流れるため `Where-Object` のフィルタが黙って無効化される。いったん変数に代入してからパイプすること。
+署名していないため、環境によっては実行がブロックされる。その場合はスクリプト単位で許可する。
 
 ```powershell
-# 誤り: count=1（配列全体が 1 要素として流れる）
-@(Invoke-RestMethod $url | Where-Object { $_.type -eq 'page' })
-
-# 正しい: count=2
-$response = Invoke-RestMethod $url
-@($response | Where-Object { $_.type -eq 'page' })
+powershell.exe -ExecutionPolicy Bypass -File .\tools\split-chrome.ps1 ...
 ```
 
-**背面ウィンドウでは JS タイマーが間引かれる。** ページ自身の `setInterval` による自動更新が止まる原因になるため、`--disable-background-timer-throttling` ほか 2 つのフラグを付けて起動している。
+## リポジトリ構成
+
+```
+win-desktop-tools/
+├── tools/            スクリプト本体と詳細な使い方
+└── README.md         このファイル（一覧）
+```
+
+## 追加するときのルール
+
+- **public リポジトリなので、社内 URL・ホスト名・認証情報を含めない。** 環境依存の値は引数か環境変数で受け取る
+- 文字コードは UTF-8（BOM なし）、改行は LF
+- 作業ブランチは `develop`。機能追加は `feature/*` を切って `develop` へマージする
 
 ## ライセンス
 
