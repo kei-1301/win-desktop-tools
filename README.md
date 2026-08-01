@@ -6,8 +6,9 @@ Windows のデスクトップ操作まわりで使っている PowerShell スク
 
 | ツール | 概要 |
 |---|---|
-| [`tools/split-chrome.ps1`](tools/) | 2 つの URL をタブバー無しのウィンドウで左右に並べ、一定間隔で自動リロードする |
-| [`tools/reload-now.ps1`](tools/) | 上で開いたページを、間隔を待たずに即座にリロードする |
+| [`tools/split-chrome.ps1`](tools/) | 2 つの URL をタブバー無しのウィンドウで左右に並べ、画面にエラーが出たら即リロードする |
+| [`tools/reload-now.ps1`](tools/) | 上で開いたページを、手動で今すぐリロードする |
+| [`tools/auto-reload-extension/`](tools/) | 定期リロードだけを行う最小構成の Chrome 拡張。常駐プロセスもデバッグポートも要らない |
 
 使い方とオプションは [tools/README.md](tools/README.md) にまとめてある。
 
@@ -22,6 +23,8 @@ git clone https://github.com/kei-1301/win-desktop-tools.git
 ```powershell
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/kei-1301/win-desktop-tools/main/tools/split-chrome.ps1" -OutFile split-chrome.ps1
 ```
+
+`-OutFile` はバイト列のまま保存するので文字コードの指定は要らない（実測で SHA256 まで一致）。ただし `| Out-File` に置き換えると PowerShell 5.1 では UTF-16LE で保存されて壊れる。詳細は [tools/README.md の実装メモ](tools/README.md#ダウンロードした-ps1-の文字コード)。
 
 ## 動作要件
 
@@ -48,6 +51,7 @@ win-desktop-tools/
 
 - **public リポジトリなので、社内 URL・ホスト名・認証情報を含めない。** 環境依存の値は引数か環境変数で受け取る
 - 文字コードは UTF-8（BOM なし）、改行は LF
+- **`.ps1` には非 ASCII 文字を書かない。** PowerShell 5.1 は BOM 無しのスクリプトを ANSI として読むため、日本語コメントを入れると化ける。説明は README 側に書く
 - 作業ブランチは `develop`。機能追加は `feature/*` を切って `develop` へマージする
 
 ## ライセンス

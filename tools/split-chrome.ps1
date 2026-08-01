@@ -1,5 +1,6 @@
-# Open two URLs as chrome-less app windows tiled left / right, then reload
-# both on a fixed interval until stopped with Ctrl+C.
+# Open two URLs as chrome-less app windows tiled left / right, then watch both
+# and reload whichever one breaks, until stopped with Ctrl+C. A fixed-interval
+# reload is available too but off by default (-IntervalMinutes).
 #
 # Why it works this way (all points below were verified by measurement):
 #
@@ -13,26 +14,66 @@
 #     which needs no focus at all -- and works even when the page's own
 #     auto-refresh script is broken.
 #
-#   * CDP requires --remote-debugging-port, which cannot be attached to an
-#     existing session. Hence the dedicated profile directory: sites needing a
-#     login must be signed into once, after which the profile keeps the session.
+#   * CDP requires --remote-debugging-port, and the flag is IGNORED when Chrome
+#     is already running (measured: the port never opens). So by default this
+#     runs against your normal Chrome profile and asks you to close Chrome
+#     first -- that way pages you are signed into (Gmail and friends) open as
+#     usual. Pass -ProfileDir to use a separate profile instead, which can be
+#     started without closing Chrome but carries no logins of its own.
+#
+#   * Chrome is never closed automatically: killing it loses the session, and
+#     --restore-last-session did not bring the tabs back in testing, whether
+#     the browser was killed or closed gracefully. Reopen tabs with Ctrl+Shift+T.
+#
+#   * Health is judged from the rendered text (CDP Runtime.evaluate), not from
+#     HTTP status, because the failure being watched for is a page that loads
+#     fine and then shows an error on screen. Two guards keep this from looping:
+#     a page that is not readyState=complete is never judged (it is momentarily
+#     blank during every navigation), and a pane that stays broken backs off
+#     30s -> 60s -> ... -> 600s instead of reloading forever.
 #
 # The debugging port listens on 127.0.0.1 only, but note that any local process
-# can drive this browser through it while the script runs. Use a port you are
-# not exposing, and keep this profile separate from your main browsing.
+# can drive this browser through it while the script runs.
+#
+# Progress output is silent by default; pass -Verbose to see placement and each
+# reload.
 #
 # Usage:
 #   .\split-chrome.ps1 -Left https://a.example -Right https://b.example
+#   .\split-chrome.ps1 -Left ... -Right ... -ErrorPattern "session expired"
 #   .\split-chrome.ps1 -Left ... -Right ... -IntervalMinutes 10 -CoverTaskbar
+#   .\split-chrome.ps1 -Left ... -Right ... -ProfileDir "$env:LOCALAPPDATA\ChromeDashboard"
 
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Left,
     [Parameter(Mandatory = $true)][string]$Right,
-    [int]$IntervalMinutes = 30,
+    # 0 disables the timer; pages are then reloaded only when they look broken.
+    [int]$IntervalMinutes = 0,
+    # How often each page is inspected for an error state. Each check is a
+    # single CDP evaluate (a few ms), so a short interval is cheap and makes
+    # recovery feel immediate.
+    [int]$CheckIntervalSeconds = 3,
+    # Text that means "this page is broken". Written with \uXXXX escapes on
+    # purpose: PowerShell 5.1 reads a BOM-less UTF-8 script as ANSI, so literal
+    # Japanese here would arrive mangled and break parsing (measured). The regex
+    # engine decodes the escapes, so Japanese page text still matches.
+    #   \u30a8\u30e9\u30fc = "error" (katakana)
+    #   \u5931\u6557 = "failure"
+    #   \u30bf\u30a4\u30e0\u30a2\u30a6\u30c8 = "timeout"
+    [string]$ErrorPattern = 'Error|ERROR|Exception|\u30a8\u30e9\u30fc|\u5931\u6557|\u30bf\u30a4\u30e0\u30a2\u30a6\u30c8',
+    # Treat an empty page as broken too (blank / hung screens).
+    [switch]$NoBlankCheck,
     # Extend windows over the taskbar strip (pair with taskbar auto-hide).
     [switch]$CoverTaskbar,
     [int]$Port = 9223,
-    [string]$ProfileDir = "$env:LOCALAPPDATA\ChromeDashboard"
+    # Empty means the normal Chrome profile (with your logins). Set a path to
+    # use an isolated profile that can start while Chrome is running.
+    [string]$ProfileDir = '',
+    # Which profile inside the normal Chrome data dir to open, e.g. "Profile 1".
+    # Empty lets Chrome pick the one it used last. Check yours at chrome://version
+    # under "Profile Path". Ignored when -ProfileDir is set.
+    [string]$ChromeProfile = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -111,38 +152,128 @@ public class ChromeWin {
 }
 '@
 
+function Test-CdpPort {
+    param([int]$Port)
+    try {
+        # -Verbose:$false so -Verbose on the script shows only our own progress,
+        # not the HTTP chatter of every poll.
+        Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/version" -TimeoutSec 2 -Verbose:$false | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Get-CdpPages {
     param([int]$Port, [int]$TimeoutSec = 3)
     try {
-        $all = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json" -TimeoutSec $TimeoutSec
+        $all = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json" -TimeoutSec $TimeoutSec -Verbose:$false
         return @($all | Where-Object { $_.type -eq 'page' })
     } catch {
         return @()
     }
 }
 
-function Invoke-CdpReload {
-    param([string]$TargetId, [int]$Port)
+function Receive-CdpMessage {
+    param($Socket, $Token)
+
+    $buffer = New-Object byte[] 32768
+    $sb = New-Object System.Text.StringBuilder
+    do {
+        $seg = New-Object 'System.ArraySegment[byte]' -ArgumentList @(, $buffer)
+        $res = $Socket.ReceiveAsync($seg, $Token).GetAwaiter().GetResult()
+        if ($res.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) { return $null }
+        [void]$sb.Append([System.Text.Encoding]::UTF8.GetString($buffer, 0, $res.Count))
+    } while (-not $res.EndOfMessage)
+    return $sb.ToString()
+}
+
+# Send one CDP command. Returns the reply object, or $true/$false with -NoReply.
+function Invoke-CdpCommand {
+    param(
+        [string]$TargetId,
+        [int]$Port,
+        [string]$Method,
+        $Params,
+        [int]$TimeoutSec = 8,
+        [switch]$NoReply
+    )
 
     $socket = New-Object System.Net.WebSockets.ClientWebSocket
-    $token = [System.Threading.CancellationToken]::None
+    $cts = New-Object System.Threading.CancellationTokenSource
+    $cts.CancelAfter($TimeoutSec * 1000)   # ReceiveAsync would block forever otherwise
+    $token = $cts.Token
     try {
         $socket.ConnectAsync([Uri]"ws://127.0.0.1:$Port/devtools/page/$TargetId", $token).GetAwaiter().GetResult() | Out-Null
-        $payload = '{"id":1,"method":"Page.reload","params":{"ignoreCache":true}}'
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        $payload = @{ id = 1; method = $Method }
+        if ($Params) { $payload['params'] = $Params }
+        $json = $payload | ConvertTo-Json -Depth 6 -Compress
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
         $segment = New-Object 'System.ArraySegment[byte]' -ArgumentList @(, $bytes)
         $socket.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $token).GetAwaiter().GetResult() | Out-Null
-        Start-Sleep -Milliseconds 500  # let the frame flush before tearing down
-        return $true
+
+        if ($NoReply) {
+            Start-Sleep -Milliseconds 300  # let the frame flush before tearing down
+            return $true
+        }
+        # Events arrive interleaved with replies, so read until our id shows up.
+        while (-not $token.IsCancellationRequested) {
+            $text = Receive-CdpMessage -Socket $socket -Token $token
+            if (-not $text) { break }
+            $obj = $text | ConvertFrom-Json
+            if ($obj.PSObject.Properties.Name -contains 'id' -and $obj.id -eq 1) { return $obj }
+        }
+        return $null
     } catch {
-        Write-Warning "reload failed for $TargetId : $($_.Exception.Message)"
-        return $false
+        Write-Verbose "CDP $Method failed: $($_.Exception.Message)"
+        if ($NoReply) { return $false }
+        return $null
     } finally {
-        # Abort, not CloseAsync: the pending CDP response would make a graceful
-        # close throw, and the command has already been sent by this point.
+        # Abort, not CloseAsync: a pending CDP response makes a graceful close throw.
         try { $socket.Abort() } catch { }
         $socket.Dispose()
+        $cts.Dispose()
     }
+}
+
+function Invoke-CdpReload {
+    param([string]$TargetId, [int]$Port)
+    return [bool](Invoke-CdpCommand -TargetId $TargetId -Port $Port -Method 'Page.reload' -Params @{ ignoreCache = $true } -NoReply)
+}
+
+# Classify a page as 'ok', 'blank', 'error', or $null when it cannot be judged
+# (still loading, or CDP did not answer). Callers must not reload on $null.
+function Get-PageHealth {
+    param([string]$TargetId, [int]$Port, [string]$Pattern, [bool]$CheckBlank)
+
+    $expression = @'
+(function () {
+  var body = document.body;
+  var text = body ? (body.innerText || "") : "";
+  return JSON.stringify({
+    ready: document.readyState,
+    len: text.replace(/\s+/g, "").length,
+    text: text.slice(0, 4000)
+  });
+})()
+'@
+    $reply = Invoke-CdpCommand -TargetId $TargetId -Port $Port -Method 'Runtime.evaluate' -Params @{
+        expression    = $expression
+        returnByValue = $true
+    }
+    if (-not $reply) { return $null }
+
+    $raw = $reply.result.result.value
+    if (-not $raw) { return $null }
+    try { $state = $raw | ConvertFrom-Json } catch { return $null }
+
+    # A page mid-navigation is legitimately empty; judging it would cause a
+    # reload loop right after every reload.
+    if ($state.ready -ne 'complete') { return $null }
+
+    if ($Pattern -and $state.text -match $Pattern) { return 'error' }
+    if ($CheckBlank -and $state.len -eq 0) { return 'blank' }
+    return 'ok'
 }
 
 # Wait for a newly opened Chrome window and return its handle.
@@ -184,6 +315,35 @@ function Wait-NewCdpPage {
     throw 'Timed out waiting for a new CDP target'
 }
 
+# Using the normal profile means the debugging port has to be opened by the
+# browser we start ourselves, and Chrome silently drops the flag when an
+# instance is already up. Decide from the running processes rather than from the
+# port alone: an open port may belong to a different profile entirely, in which
+# case starting here would wait forever for a target that never appears.
+if (-not $ProfileDir) {
+    $browsers = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -notlike '*--type=*' })
+    $mainProfile = @($browsers | Where-Object { $_.CommandLine -notlike '*--user-data-dir=*' })
+    $alreadyServing = @($mainProfile | Where-Object { $_.CommandLine -like "*--remote-debugging-port=$Port*" })
+
+    if ($mainProfile.Count -gt 0 -and $alreadyServing.Count -eq 0) {
+        throw @"
+Chrome is already running, and the debugging port cannot be attached to a
+running browser - auto-reload would be impossible. Close every Chrome window,
+then run this again (reopen your tabs afterwards with Ctrl+Shift+T).
+
+To keep Chrome open instead, use a separate profile. Note it carries none of
+your logins, so pages like Gmail show a sign-in screen until you log in once:
+
+    -ProfileDir "`$env:LOCALAPPDATA\ChromeDashboard"
+"@
+    }
+
+    if ($alreadyServing.Count -eq 0 -and (Test-CdpPort -Port $Port)) {
+        throw "Port $Port is already used by another browser instance. Pick another with -Port, or stop that instance."
+    }
+}
+
 Add-Type -AssemblyName System.Windows.Forms
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen
 $area = if ($CoverTaskbar) { $screen.Bounds } else { $screen.WorkingArea }
@@ -205,8 +365,11 @@ foreach ($pane in $panes) {
     # while the window sits in the background, which Chrome otherwise slows to a
     # crawl or freezes. Reloads here do not depend on them -- CDP works either
     # way -- but they stop the page's built-in auto-refresh from stalling.
-    $chromeArgs = @(
-        "--user-data-dir=$ProfileDir"
+    $chromeArgs = @()
+    # No --user-data-dir at all means the normal profile, logins included.
+    if ($ProfileDir) { $chromeArgs += "--user-data-dir=$ProfileDir" }
+    elseif ($ChromeProfile) { $chromeArgs += "--profile-directory=$ChromeProfile" }
+    $chromeArgs += @(
         "--remote-debugging-port=$Port"
         '--no-first-run'
         '--no-default-browser-check'
@@ -223,28 +386,72 @@ foreach ($pane in $panes) {
     $page = Wait-NewCdpPage -BeforeIds $pageIdsBefore -Port $Port -ExpectUrl $pane.Url
     $tracked += @{ Name = $pane.Name; Url = $pane.Url; TargetId = $page.id }
 
-    Write-Host ("{0,-6} placed at {1},{2} {3}x{4}" -f $pane.Name, $pane.X, $area.Y, $halfWidth, $area.Height)
+    Write-Verbose ("{0,-6} placed at {1},{2} {3}x{4}" -f $pane.Name, $pane.X, $area.Y, $halfWidth, $area.Height)
 }
 
-Write-Host ("reloading every {0} min - press Ctrl+C to stop" -f $IntervalMinutes)
+if ($IntervalMinutes -gt 0) {
+    Write-Verbose ("watching every {0}s, plus a timed reload every {1} min - Ctrl+C to stop" -f $CheckIntervalSeconds, $IntervalMinutes)
+} else {
+    Write-Verbose ("watching every {0}s, reloading only on errors - Ctrl+C to stop" -f $CheckIntervalSeconds)
+}
+
+# Reloading cannot fix a page that is broken at the source, so an unchanged
+# error must not spin the loop. After each reload a pane is left alone for
+# GraceSeconds, doubling up to MaxGrace while the error persists, and reset as
+# soon as the page comes back healthy.
+$graceSeconds = 30
+$maxGraceSeconds = 600
+$state = @{}
+foreach ($pane in $tracked) {
+    $state[$pane.TargetId] = @{ LastReload = [Environment]::TickCount; Grace = $graceSeconds; Strikes = 0 }
+}
 
 while ($true) {
-    Start-Sleep -Seconds ($IntervalMinutes * 60)
+    Start-Sleep -Seconds $CheckIntervalSeconds
 
     $live = @(Get-CdpPages -Port $Port | ForEach-Object { $_.id })
     if ($live.Count -eq 0) {
-        Write-Host 'browser is gone - stopping'
+        Write-Verbose 'browser is gone - stopping'
         break
     }
 
     foreach ($pane in $tracked) {
         if ($live -notcontains $pane.TargetId) {
-            Write-Warning "$($pane.Name) window was closed - skipping"
+            Write-Verbose "$($pane.Name) window was closed - skipping"
             continue
         }
+
+        $paneState = $state[$pane.TargetId]
+        $sinceReload = ([Environment]::TickCount - $paneState.LastReload) / 1000
         $stamp = (Get-Date).ToString('HH:mm:ss')
+
+        if ($IntervalMinutes -gt 0 -and $sinceReload -ge ($IntervalMinutes * 60)) {
+            if (Invoke-CdpReload -TargetId $pane.TargetId -Port $Port) {
+                $paneState.LastReload = [Environment]::TickCount
+                Write-Verbose "$stamp reloaded $($pane.Name) (timer)"
+            }
+            continue
+        }
+
+        $health = Get-PageHealth -TargetId $pane.TargetId -Port $Port -Pattern $ErrorPattern -CheckBlank (-not $NoBlankCheck)
+        if (-not $health) { continue }   # loading or unreachable: not a verdict
+
+        if ($health -eq 'ok') {
+            $paneState.Grace = $graceSeconds
+            $paneState.Strikes = 0
+            continue
+        }
+
+        if ($sinceReload -lt $paneState.Grace) { continue }
+
         if (Invoke-CdpReload -TargetId $pane.TargetId -Port $Port) {
-            Write-Host "$stamp reloaded $($pane.Name)"
+            $paneState.LastReload = [Environment]::TickCount
+            $paneState.Strikes++
+            Write-Verbose "$stamp reloaded $($pane.Name) ($health, attempt $($paneState.Strikes))"
+            if ($paneState.Strikes -ge 2) {
+                $paneState.Grace = [Math]::Min($paneState.Grace * 2, $maxGraceSeconds)
+                Write-Verbose "$stamp $($pane.Name) still failing - backing off to $($paneState.Grace)s"
+            }
         }
     }
 }
