@@ -25,8 +25,11 @@ const CHECK_INTERVAL_MS = 3000;
 // none of these words -- and a content script is not injected into it anyway,
 // since chrome-error:// pages are off limits to extensions. Add server-side
 // wordings your system actually shows.
+// PHP prints diagnostics straight into the page ("Warning: Undefined variable
+// $row2 in ... on line 199"), and none of the generic words above appear in
+// them, so the notice prefixes are listed explicitly.
 const ERROR_PATTERN =
-  /error|exception|ERR_|DNS_PROBE|Bad Gateway|Service Unavailable|エラー|失敗|タイムアウト|アクセスできません/i;
+  /error|exception|Warning:|Notice:|Deprecated:|Undefined variable|ERR_|DNS_PROBE|Bad Gateway|Service Unavailable|エラー|失敗|タイムアウト|アクセスできません/i;
 
 // Treat a page with no visible text as broken (blank / hung screen).
 const CHECK_BLANK = true;

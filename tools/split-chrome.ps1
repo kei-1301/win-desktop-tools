@@ -54,7 +54,7 @@ param(
     #   \u30a8\u30e9\u30fc = "error" (katakana)
     #   \u5931\u6557 = "failure"
     #   \u30bf\u30a4\u30e0\u30a2\u30a6\u30c8 = "timeout"
-    [string]$ErrorPattern = 'error|exception|ERR_|DNS_PROBE|Bad Gateway|Service Unavailable|\u30a8\u30e9\u30fc|\u5931\u6557|\u30bf\u30a4\u30e0\u30a2\u30a6\u30c8|\u30a2\u30af\u30bb\u30b9\u3067\u304d\u307e\u305b\u3093',
+    [string]$ErrorPattern = 'error|exception|Warning:|Notice:|Deprecated:|Undefined variable|ERR_|DNS_PROBE|Bad Gateway|Service Unavailable|\u30a8\u30e9\u30fc|\u5931\u6557|\u30bf\u30a4\u30e0\u30a2\u30a6\u30c8|\u30a2\u30af\u30bb\u30b9\u3067\u304d\u307e\u305b\u3093',
     # Treat an empty page as broken too (blank / hung screens).
     [switch]$NoBlankCheck,
     # Extend windows over the taskbar strip (pair with taskbar auto-hide).
