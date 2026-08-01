@@ -54,6 +54,34 @@ powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\path\to\too
 
 ---
 
+## auto-reload-extension/
+
+スクリプトを常駐させずに定期リロードしたいとき用の、最小構成の Chrome 拡張。ページ自身がリロードするので、デバッグポートもリロード役のプロセスも要らない。ウィンドウの配置はしないので、左右分割が要るなら `split-chrome.ps1` を使う。
+
+### 設定
+
+`manifest.json` の `matches` を対象 URL に、`reload.js` の `INTERVAL_MINUTES` を間隔に書き換える。
+
+### インストール
+
+**起動オプションでは入れられない**（後述）。プロファイルに 1 回だけ手動で入れる。
+
+```powershell
+& "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" --user-data-dir="$env:LOCALAPPDATA\ChromeDashboard"
+```
+
+1. 上のように対象プロファイルで Chrome を開く
+2. `chrome://extensions` でデベロッパーモードを ON
+3. 「パッケージ化されていない拡張機能を読み込む」で `auto-reload-extension` フォルダを選ぶ
+
+以降はこのプロファイルで起動するかぎり有効。
+
+### 実測できていない点
+
+`--load-extension` が塞がれていて自動テストに載せられないため、**手動インストール後の動作は未検証**。`--app` ウィンドウでもコンテンツスクリプトが動くのは Chrome の通常挙動だが、この repo の他の記述と違ってここだけは実測の裏付けが無い。
+
+---
+
 ## 実装メモ
 
 素直に書くと動かない箇所があり、いずれも実測して回避している。同じ罠を踏まないための記録。
@@ -91,3 +119,25 @@ $response = Invoke-RestMethod $url
 ### 背面ウィンドウでは JS タイマーが間引かれる
 
 ページ自身の `setInterval` による自動更新が止まる原因になる。`--disable-background-timer-throttling` ほか 2 つのフラグを付けて起動している。ページ側の自動更新が効かない場合はこれを疑うとよい。
+
+### `--load-extension` は Stable の Chrome では無視される
+
+拡張機能を起動オプションだけで差し込むことはできない。Chrome 150 での実測結果:
+
+| 確認したこと | 結果 |
+|---|---|
+| コンテンツスクリプトの実行 | 一度も動かない |
+| プロファイルの `Preferences` への登録 | 記録なし（読み込まれてすらいない） |
+| デベロッパーモードを事前に ON にして再試行 | 変化なし |
+
+エラーも警告も出さずに黙って無視される。Chrome 137 前後で Stable / Beta では無効化された。そのため拡張機能はプロファイルへ手動で入れておくしかなく、起動から定期リロードまでを完全に自動化したいなら DevTools Protocol 経由（`split-chrome.ps1` の方式）になる。
+
+### ダウンロードした `.ps1` の文字コード
+
+`Invoke-WebRequest -OutFile` はレスポンスをバイト列のまま書き出すので、文字コードの指定は要らない（指定するパラメータも無い）。実測でも raw.githubusercontent.com から取得したファイルはローカルと SHA256 まで一致し、UTF-8 (BOM なし) / LF が保たれた。
+
+注意点が 2 つある。
+
+**パイプで保存しない。** `Invoke-WebRequest ... | Out-File x.ps1` は本文をいったん文字列にしてから書き直すため、Windows PowerShell 5.1 では既定の UTF-16LE で保存されて壊れる。`-OutFile` を使うこと。
+
+**Windows PowerShell 5.1 は BOM 無しのスクリプトを ANSI (CP932) として読む。** 非 ASCII 文字を含む `.ps1` はそれだけで化ける。この repo の `.ps1` は非 ASCII バイトを 1 つも含めないことで回避している（日本語は `README.md` 側に置く）。スクリプトを足すときも、コメントと出力は ASCII に保つこと。
