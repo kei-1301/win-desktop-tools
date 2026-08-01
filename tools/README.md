@@ -138,7 +138,7 @@ powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\path\to\too
 
 ## auto-reload-extension/（方式 A）
 
-ページの中から自分自身を監視してリロードする最小構成の Chrome 拡張。デバッグポートも常駐プロセスも要らないので、**いつものログイン済みプロファイルで使える**のが最大の利点。ウィンドウの配置はしないので、左右分割は `split-chrome.ps1 -NoWatch` と組み合わせる。
+ページの中から自分自身を監視し、**エラーが出たらリロード**し、**長いページはゆっくりスクロール**する Chrome 拡張。デバッグポートも常駐プロセスも要らないので、**いつものログイン済みプロファイルで使える**のが最大の利点。ウィンドウの配置はしないので、左右分割は `split-chrome.ps1 -NoWatch` と組み合わせる。
 
 判定内容は `split-chrome.ps1` の監視と同じ。3 秒ごとに本文を見て、エラー文言か真っ白ならリロードする。読み込み中を判定しない点、復旧しない障害で 30 秒→最大 10 分とバックオフする点も同じ。リロードすると変数が消えるため、バックオフの状態は `sessionStorage` に持たせている。
 
@@ -155,9 +155,24 @@ powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\path\to\too
 | 定数 | 既定値 | 意味 |
 |---|---|---|
 | `CHECK_INTERVAL_MS` | `3000` | 点検の間隔（ミリ秒） |
-| `ERROR_PATTERN` | `/Error\|ERROR\|Exception\|エラー\|失敗\|タイムアウト/` | 壊れているとみなす文言 |
+| `ERROR_PATTERN` | 下記「既定で拾う文言」参照 | 壊れているとみなす文言 |
 | `CHECK_BLANK` | `true` | 真っ白を異常とみなすか |
 | `INTERVAL_MINUTES` | `0` | 0 以外にすると定期リロードも行う |
+| `SCROLL_ENABLED` | `true` | 自動スクロールするか |
+| `SCROLL_STEP_PX` | `1` | 1 回に進む量（px） |
+| `SCROLL_INTERVAL_MS` | `30` | スクロールの間隔（ミリ秒） |
+| `SCROLL_BOTTOM_PAUSE_MS` | `3000` | 最下部での停止時間 |
+| `SCROLL_TOP_PAUSE_MS` | `1000` | 先頭に戻った直後の停止時間 |
+
+### 自動スクロール
+
+画面に収まりきらないページを、ゆっくり下へ送る。最下部に着いたら 3 秒止まり、先頭へ戻って繰り返す。掲示用ディスプレイで下の方の内容も見せるための動作。
+
+速度は `SCROLL_STEP_PX` ÷ `SCROLL_INTERVAL_MS` で決まる。既定は毎秒 33px 相当（実測では約 27px/秒。タイマーの粒度で少し遅くなる）。速すぎる・遅すぎる場合は `SCROLL_INTERVAL_MS` を変える。
+
+**スクロール不要なページでは何もしない。** 画面に収まる高さなら位置は 0 のまま動かない（実測確認済み）。
+
+不要なら `SCROLL_ENABLED` を `false` にする。
 
 ### インストール
 
@@ -179,6 +194,8 @@ powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\path\to\too
 
 - エラー文言のあるページ → **3 秒でリロード**
 - 正常なページ → **45 秒間リロードなし**（誤検知なし）
+- 長いページ → 約 27px/秒で下降し、最下部で 3 秒停止、先頭へ復帰
+- 短いページ → スクロール位置は 0 のまま動かない
 
 ただし**拡張機能として手動インストールした状態は未検証**。`--load-extension` が塞がれており自動テストに載せられないため。`--app` ウィンドウでコンテンツスクリプトが動くこと自体は Chrome の通常挙動だが、ここだけは実測の裏付けが無い。
 

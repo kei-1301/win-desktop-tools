@@ -7,7 +7,7 @@ Windows のデスクトップ操作まわりで使っている PowerShell スク
 | ツール | 概要 |
 |---|---|
 | [`tools/split-chrome.ps1`](tools/) | 2 つの URL をタブバー無しのウィンドウで左右に並べ、画面にエラーが出たら即リロードする |
-| [`tools/auto-reload-extension/`](tools/) | 同じ検知をページの中から行う Chrome 拡張。**いつものログイン済みプロファイルで使える** |
+| [`tools/auto-reload-extension/`](tools/) | 同じ検知をページの中から行い、長いページはゆっくり自動スクロールする Chrome 拡張。**いつものログイン済みプロファイルで使える** |
 | [`tools/reload-now.ps1`](tools/) | 上で開いたページを、手動で今すぐリロードする |
 
 使い方とオプションは [tools/README.md](tools/README.md) にまとめてある。
