@@ -1,0 +1,11 @@
+# Logs and scratch output
+*.log
+_temp/
+
+# Chrome profile created at runtime by split-chrome.ps1
+chrome-dash-profile/
+ChromeDashboard/
+
+# Windows
+Thumbs.db
+desktop.ini
