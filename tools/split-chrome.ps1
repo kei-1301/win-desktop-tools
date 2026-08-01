@@ -14,16 +14,10 @@
 #     which needs no focus at all -- and works even when the page's own
 #     auto-refresh script is broken.
 #
-#   * CDP requires --remote-debugging-port, and the flag is IGNORED when Chrome
-#     is already running (measured: the port never opens). So by default this
-#     runs against your normal Chrome profile and asks you to close Chrome
-#     first -- that way pages you are signed into (Gmail and friends) open as
-#     usual. Pass -ProfileDir to use a separate profile instead, which can be
-#     started without closing Chrome but carries no logins of its own.
-#
-#   * Chrome is never closed automatically: killing it loses the session, and
-#     --restore-last-session did not bring the tabs back in testing, whether
-#     the browser was killed or closed gracefully. Reopen tabs with Ctrl+Shift+T.
+#   * CDP requires --remote-debugging-port, which Chrome only honours on a
+#     non-default data directory, so this runs on a profile of its own. That
+#     also means your everyday Chrome can stay open while it runs. See the note
+#     further down for the two measurements behind this.
 #
 #   * Health is judged from the rendered text (CDP Runtime.evaluate), not from
 #     HTTP status, because the failure being watched for is a page that loads
@@ -42,7 +36,6 @@
 #   .\split-chrome.ps1 -Left https://a.example -Right https://b.example
 #   .\split-chrome.ps1 -Left ... -Right ... -ErrorPattern "session expired"
 #   .\split-chrome.ps1 -Left ... -Right ... -IntervalMinutes 10 -CoverTaskbar
-#   .\split-chrome.ps1 -Left ... -Right ... -ProfileDir "$env:LOCALAPPDATA\ChromeDashboard"
 
 [CmdletBinding()]
 param(
@@ -67,16 +60,27 @@ param(
     # Extend windows over the taskbar strip (pair with taskbar auto-hide).
     [switch]$CoverTaskbar,
     [int]$Port = 9223,
-    # Empty means the normal Chrome profile (with your logins). Set a path to
-    # use an isolated profile that can start while Chrome is running.
-    [string]$ProfileDir = '',
-    # Which profile inside the normal Chrome data dir to open, e.g. "Profile 1".
-    # Empty lets Chrome pick the one it used last. Check yours at chrome://version
-    # under "Profile Path". Ignored when -ProfileDir is set.
-    [string]$ChromeProfile = ''
+    # Dedicated Chrome profile for the dashboard. It has to be separate from
+    # your everyday one -- see the note below the parameters for why.
+    [string]$ProfileDir = "$env:LOCALAPPDATA\ChromeDashboard"
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Why this cannot run on your everyday Chrome profile, both measured on 150:
+#
+#   * Chrome refuses --remote-debugging-port whenever the data directory is the
+#     default one, whether that is implied or spelled out in full. The port
+#     simply never opens, so there is no way to drive reloads.
+#
+#   * Copying the signed-in cookies into another directory does not help either:
+#     since Chrome 127 they are sealed with app-bound encryption and a second
+#     profile just gets a sign-in screen.
+#
+# So a dedicated profile it is. Sign in once inside the window it opens and the
+# session persists there from then on -- and unlike the default profile, this
+# needs no closing of your normal Chrome.
+$isFirstRun = -not (Test-Path $ProfileDir)
 
 $chromePaths = @(
     "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
@@ -151,6 +155,17 @@ public class ChromeWin {
     }
 }
 '@
+
+# Browser processes (not renderers) sharing the given data directory, counting
+# both the explicit spelling and the implicit default.
+function Get-BrowsersOnDataDir {
+    param([string]$DataDir)
+    return @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue -Verbose:$false |
+        Where-Object {
+            $_.CommandLine -and $_.CommandLine -notlike '*--type=*' -and
+            ($_.CommandLine -notlike '*--user-data-dir=*' -or $_.CommandLine -like "*--user-data-dir=$DataDir*")
+        })
+}
 
 function Test-CdpPort {
     param([int]$Port)
@@ -315,44 +330,25 @@ function Wait-NewCdpPage {
     throw 'Timed out waiting for a new CDP target'
 }
 
-# Using the normal profile means the debugging port has to be opened by the
-# browser we start ourselves, and Chrome silently drops the flag when an
-# instance is already up. Decide from the running processes rather than from the
-# port alone: an open port may belong to a different profile entirely, in which
-# case starting here would wait forever for a target that never appears.
-if (-not $ProfileDir) {
-    $browsers = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -and $_.CommandLine -notlike '*--type=*' })
-    $mainProfile = @($browsers | Where-Object { $_.CommandLine -notlike '*--user-data-dir=*' })
-    $alreadyServing = @($mainProfile | Where-Object { $_.CommandLine -like "*--remote-debugging-port=$Port*" })
+# A port already answering belongs to a browser this script started earlier and
+# is fine to join. One that answers while no dashboard browser is running means
+# something else took it, and waiting would hang on a target that never appears.
+$servingThisProfile = @(Get-BrowsersOnDataDir -DataDir $ProfileDir |
+    Where-Object { $_.CommandLine -like "*--remote-debugging-port=$Port*" })
+if ($servingThisProfile.Count -eq 0 -and (Test-CdpPort -Port $Port)) {
+    Write-Host ''
+    Write-Host "Port $Port is already used by another browser instance." -ForegroundColor Yellow
+    Write-Host '  Pick a free one with -Port, or stop that instance.'
+    Write-Host ''
+    exit 1
+}
 
-    if ($mainProfile.Count -gt 0 -and $alreadyServing.Count -eq 0) {
-        # Write-Host + exit, not throw: this is expected user guidance, and a
-        # throw buries it under a stack trace that repeats the whole message.
-        Write-Host ''
-        Write-Host 'Chrome is already running.' -ForegroundColor Yellow
-        Write-Host ''
-        Write-Host '  The debugging port cannot be attached to a browser that is already open,'
-        Write-Host '  so auto-reload would not work. Choose one:'
-        Write-Host ''
-        Write-Host '  1) Close every Chrome window, then run this again.' -ForegroundColor Cyan
-        Write-Host '     Your tabs come back with Ctrl+Shift+T. Pages you are signed into'
-        Write-Host '     (Gmail and friends) open as usual.'
-        Write-Host ''
-        Write-Host '  2) Keep Chrome open and use a separate profile:' -ForegroundColor Cyan
-        Write-Host "     -ProfileDir `"`$env:LOCALAPPDATA\ChromeDashboard`""
-        Write-Host '     Sign in once in that window; the profile remembers it afterwards.'
-        Write-Host ''
-        exit 1
-    }
-
-    if ($alreadyServing.Count -eq 0 -and (Test-CdpPort -Port $Port)) {
-        Write-Host ''
-        Write-Host "Port $Port is already used by another browser instance." -ForegroundColor Yellow
-        Write-Host '  Pick a free one with -Port, or stop that instance.'
-        Write-Host ''
-        exit 1
-    }
+if ($isFirstRun) {
+    Write-Host ''
+    Write-Host 'Setting up the dashboard profile for the first time.' -ForegroundColor Cyan
+    Write-Host '  Pages needing a login (Gmail and friends) will show a sign-in screen.'
+    Write-Host '  Sign in once in that window - this profile remembers it from then on.'
+    Write-Host ''
 }
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -376,10 +372,10 @@ foreach ($pane in $panes) {
     # while the window sits in the background, which Chrome otherwise slows to a
     # crawl or freezes. Reloads here do not depend on them -- CDP works either
     # way -- but they stop the page's built-in auto-refresh from stalling.
-    $chromeArgs = @()
-    # No --user-data-dir at all means the normal profile, logins included.
-    if ($ProfileDir) { $chromeArgs += "--user-data-dir=$ProfileDir" }
-    elseif ($ChromeProfile) { $chromeArgs += "--profile-directory=$ChromeProfile" }
+    # Quoted because the path may contain spaces and Start-Process does not quote
+    # list items for you; unquoted, it splits at the space and Chrome silently
+    # creates a stray profile directory from the first fragment.
+    $chromeArgs = @("--user-data-dir=`"$ProfileDir`"")
     $chromeArgs += @(
         "--remote-debugging-port=$Port"
         '--no-first-run'
