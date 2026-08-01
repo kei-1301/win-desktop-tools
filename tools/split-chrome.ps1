@@ -62,7 +62,11 @@ param(
     [int]$Port = 9223,
     # Dedicated Chrome profile for the dashboard. It has to be separate from
     # your everyday one -- see the note below the parameters for why.
-    [string]$ProfileDir = "$env:LOCALAPPDATA\ChromeDashboard"
+    [string]$ProfileDir = "$env:LOCALAPPDATA\ChromeDashboard",
+    # Just open and place the windows, then exit: no debugging port, no watching.
+    # This is the mode to use with your normal signed-in profile, letting the
+    # auto-reload-extension do the reloading from inside the page instead.
+    [switch]$NoWatch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -333,17 +337,19 @@ function Wait-NewCdpPage {
 # A port already answering belongs to a browser this script started earlier and
 # is fine to join. One that answers while no dashboard browser is running means
 # something else took it, and waiting would hang on a target that never appears.
-$servingThisProfile = @(Get-BrowsersOnDataDir -DataDir $ProfileDir |
-    Where-Object { $_.CommandLine -like "*--remote-debugging-port=$Port*" })
-if ($servingThisProfile.Count -eq 0 -and (Test-CdpPort -Port $Port)) {
-    Write-Host ''
-    Write-Host "Port $Port is already used by another browser instance." -ForegroundColor Yellow
-    Write-Host '  Pick a free one with -Port, or stop that instance.'
-    Write-Host ''
-    exit 1
+if (-not $NoWatch) {
+    $servingThisProfile = @(Get-BrowsersOnDataDir -DataDir $ProfileDir |
+        Where-Object { $_.CommandLine -like "*--remote-debugging-port=$Port*" })
+    if ($servingThisProfile.Count -eq 0 -and (Test-CdpPort -Port $Port)) {
+        Write-Host ''
+        Write-Host "Port $Port is already used by another browser instance." -ForegroundColor Yellow
+        Write-Host '  Pick a free one with -Port, or stop that instance.'
+        Write-Host ''
+        exit 1
+    }
 }
 
-if ($isFirstRun) {
+if ($isFirstRun -and -not $NoWatch) {
     Write-Host ''
     Write-Host 'Setting up the dashboard profile for the first time.' -ForegroundColor Cyan
     Write-Host '  Pages needing a login (Gmail and friends) will show a sign-in screen.'
@@ -364,20 +370,24 @@ $panes = @(
 $tracked = @()
 foreach ($pane in $panes) {
     $windowsBefore = [ChromeWin]::Handles()
-    $pageIdsBefore = @(Get-CdpPages -Port $Port | ForEach-Object { $_.id })
+    $pageIdsBefore = if ($NoWatch) { @() } else { @(Get-CdpPages -Port $Port | ForEach-Object { $_.id }) }
 
     # Start-Process, not the call operator: with a dedicated profile the first
     # invocation becomes the browser process itself and would block until exit.
-    # The throttling flags keep a page's own setInterval/setTimeout refresh alive
-    # while the window sits in the background, which Chrome otherwise slows to a
-    # crawl or freezes. Reloads here do not depend on them -- CDP works either
-    # way -- but they stop the page's built-in auto-refresh from stalling.
+    # The throttling flags keep timers alive while a window sits in the
+    # background, which Chrome otherwise slows to a crawl or freezes -- that is
+    # what the in-page extension relies on under -NoWatch.
+    $chromeArgs = @()
+    # Under -NoWatch nothing needs the debugging port, so the everyday profile is
+    # used: no --user-data-dir, which keeps the windows signed in as usual.
     # Quoted because the path may contain spaces and Start-Process does not quote
     # list items for you; unquoted, it splits at the space and Chrome silently
     # creates a stray profile directory from the first fragment.
-    $chromeArgs = @("--user-data-dir=`"$ProfileDir`"")
+    if (-not $NoWatch) {
+        $chromeArgs += "--user-data-dir=`"$ProfileDir`""
+        $chromeArgs += "--remote-debugging-port=$Port"
+    }
     $chromeArgs += @(
-        "--remote-debugging-port=$Port"
         '--no-first-run'
         '--no-default-browser-check'
         '--disable-background-timer-throttling'
@@ -390,10 +400,17 @@ foreach ($pane in $panes) {
     $handle = Wait-NewWindow -Before $windowsBefore
     [ChromeWin]::Place($handle, $pane.X, $area.Y, $halfWidth, $area.Height)
 
-    $page = Wait-NewCdpPage -BeforeIds $pageIdsBefore -Port $Port -ExpectUrl $pane.Url
-    $tracked += @{ Name = $pane.Name; Url = $pane.Url; TargetId = $page.id }
+    if (-not $NoWatch) {
+        $page = Wait-NewCdpPage -BeforeIds $pageIdsBefore -Port $Port -ExpectUrl $pane.Url
+        $tracked += @{ Name = $pane.Name; Url = $pane.Url; TargetId = $page.id }
+    }
 
     Write-Verbose ("{0,-6} placed at {1},{2} {3}x{4}" -f $pane.Name, $pane.X, $area.Y, $halfWidth, $area.Height)
+}
+
+if ($NoWatch) {
+    Write-Verbose 'placed both windows; reloading is left to the extension'
+    return
 }
 
 if ($IntervalMinutes -gt 0) {
@@ -410,7 +427,14 @@ $graceSeconds = 30
 $maxGraceSeconds = 600
 $state = @{}
 foreach ($pane in $tracked) {
-    $state[$pane.TargetId] = @{ LastReload = [Environment]::TickCount; Grace = $graceSeconds; Strikes = 0 }
+    # LastReload starts far enough back that a pane which is already broken gets
+    # reloaded at the first check instead of waiting out a grace period it never
+    # earned. Pages still loading are excluded by the readyState guard.
+    $state[$pane.TargetId] = @{
+        LastReload = [Environment]::TickCount - ($graceSeconds * 1000)
+        Grace      = $graceSeconds
+        Strikes    = 0
+    }
 }
 
 while ($true) {
