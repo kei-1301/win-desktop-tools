@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Auto Reload",
-  "version": "2.0.0",
-  "description": "Reload the matched pages when an error appears on screen.",
+  "version": "2.1.0",
+  "description": "SETUP REQUIRED: edit content_scripts.matches to your page URL. Reloads on error and slowly scrolls long pages.",
   "content_scripts": [
     {
       "matches": ["https://example.com/*"],

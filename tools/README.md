@@ -144,11 +144,34 @@ powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\path\to\too
 
 ### 設定
 
-`manifest.json` の `matches` を対象 URL に書き換える。ここを設定しないと動かない。
+`manifest.json` の `matches` を対象 URL に書き換える。**ここを設定しないと何も起きない。** 既定値はプレースホルダなので、必ず自分の URL に変える。
 
 ```json
-"matches": ["https://your-system.example/*"]
+"matches": ["http://192.168.0.10/yoursystem/*"]
 ```
+
+書き方の注意。
+
+- **スキームを合わせる。** `http` のページに `https://...` と書いても一致しない
+- **ポート番号も含める。** `http://host:8080/` なら `http://host:8080/*`
+- 末尾は `*` にしてパス全体を含める。`.../scoreviewer.php` だけに絞ってもよいが、他のページも監視したいなら `/yoursystem/*`
+- 複数指定できる: `["http://a/*", "http://b/*"]`
+
+### 動いているか確かめる
+
+対象ページで `F12` を押し Console タブを開く。ページを再読み込みすると、1 秒ほどで次の行が出る。
+
+```
+[auto-reload] active | url=http://... | scrollable=3262px | autoScroll=on
+```
+
+| 症状 | 意味 |
+|---|---|
+| この行が出ない | 拡張が注入されていない。`matches` が URL と一致していない |
+| `scrollable=0px` | ページが画面に収まっている。スクロールする余地が無い |
+| 行は出るがスクロールしない | `SCROLL_ENABLED` が `false`、またはページ内部の枠がスクロール対象 |
+
+`manifest.json` を書き換えたら、`chrome://extensions` の Auto Reload カードにある再読み込みアイコンを押し、**対象ページも再読み込みする**こと。両方やらないと反映されない。
 
 `reload.js` の先頭で挙動を変えられる。
 
