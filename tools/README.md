@@ -2,6 +2,22 @@
 
 各スクリプトの使い方と、実装上の注意点。
 
+## どちらの方式を使うか
+
+2 つの URL をタブバー無しで左右に並べ、画面にエラーが出たら即リロードする、という目的は同じ。違いは**リロードを誰がやるか**。
+
+| | A. 拡張機能に任せる | B. スクリプトが監視する |
+|---|---|---|
+| 起動コマンド | `split-chrome.ps1 -NoWatch` | `split-chrome.ps1` |
+| Chrome プロファイル | **いつものまま**（ログイン済み） | 専用プロファイル |
+| Gmail など要ログインのページ | そのまま見られる | 初回に 1 回ログインが要る |
+| いつもの Chrome | 開いたままでよい | 開いたままでよい |
+| 事前準備 | 拡張機能を 1 回インストール | 不要 |
+| 常駐プロセス | 無し（配置したら終了） | PowerShell が常駐 |
+| デバッグポート | 開かない | 開く |
+
+**ログイン済みのページを表示したいなら A。** Chrome は既定プロファイルでのデバッグポートを拒否するため、B では専用プロファイルにならざるを得ない（詳細は後述）。A はページの中から JS でリロードするのでその制約を受けない。
+
 ---
 
 ## split-chrome.ps1
@@ -9,6 +25,10 @@
 2 つの URL を**タブバーもアドレスバーも無い**ウィンドウで開き、画面の左右に並べる。**画面にエラーが出たら即座にリロードする**ので、放置していても表示が壊れたままにならない。掲示用ダッシュボードや常時表示モニタ向け。
 
 ```powershell
+# A: いつもの Chrome で開くだけ（リロードは拡張機能が担当）
+.\split-chrome.ps1 -Left "https://a.example" -Right "https://b.example" -NoWatch
+
+# B: 専用プロファイルで開き、スクリプトが監視し続ける
 .\split-chrome.ps1 -Left "https://a.example" -Right "https://b.example"
 ```
 
@@ -22,9 +42,12 @@
 | `-NoBlankCheck` | off | 「画面が真っ白」を異常とみなす判定を切る |
 | `-IntervalMinutes` | `0` | 0 以外にすると、エラーの有無に関係なくこの分数ごとにも更新する |
 | `-CoverTaskbar` | off | タスクバー領域まで使う。Windows 側の「タスクバーを自動的に隠す」と併用する |
-| `-Port` | `9223` | DevTools のデバッグポート |
-| `-ProfileDir` | `%LOCALAPPDATA%\ChromeDashboard` | 専用 Chrome プロファイルの置き場（後述） |
+| `-NoWatch` | off | 開いて配置したら終了する（方式 A）。いつものプロファイルを使い、リロードは拡張機能に任せる |
+| `-Port` | `9223` | DevTools のデバッグポート（方式 B のみ） |
+| `-ProfileDir` | `%LOCALAPPDATA%\ChromeDashboard` | 専用 Chrome プロファイルの置き場（方式 B のみ） |
 | `-Verbose` | off | 配置とリロードの経過を表示する。既定では何も出さない |
+
+`-NoWatch` を付けたときは監視しないため、`-CheckIntervalSeconds` `-ErrorPattern` `-NoBlankCheck` `-IntervalMinutes` は効かない。これらは拡張機能側（`reload.js` の先頭）で設定する。
 
 停止は `Ctrl+C`。
 
@@ -93,31 +116,51 @@ powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\path\to\too
 
 ---
 
-## auto-reload-extension/
+## auto-reload-extension/（方式 A）
 
-スクリプトを常駐させずに定期リロードしたいとき用の、最小構成の Chrome 拡張。ページ自身がリロードするので、デバッグポートもリロード役のプロセスも要らない。ウィンドウの配置はしないので、左右分割が要るなら `split-chrome.ps1` を使う。
+ページの中から自分自身を監視してリロードする最小構成の Chrome 拡張。デバッグポートも常駐プロセスも要らないので、**いつものログイン済みプロファイルで使える**のが最大の利点。ウィンドウの配置はしないので、左右分割は `split-chrome.ps1 -NoWatch` と組み合わせる。
+
+判定内容は `split-chrome.ps1` の監視と同じ。3 秒ごとに本文を見て、エラー文言か真っ白ならリロードする。読み込み中を判定しない点、復旧しない障害で 30 秒→最大 10 分とバックオフする点も同じ。リロードすると変数が消えるため、バックオフの状態は `sessionStorage` に持たせている。
 
 ### 設定
 
-`manifest.json` の `matches` を対象 URL に、`reload.js` の `INTERVAL_MINUTES` を間隔に書き換える。
+`manifest.json` の `matches` を対象 URL に書き換える。ここを設定しないと動かない。
+
+```json
+"matches": ["https://your-system.example/*"]
+```
+
+`reload.js` の先頭で挙動を変えられる。
+
+| 定数 | 既定値 | 意味 |
+|---|---|---|
+| `CHECK_INTERVAL_MS` | `3000` | 点検の間隔（ミリ秒） |
+| `ERROR_PATTERN` | `/Error\|ERROR\|Exception\|エラー\|失敗\|タイムアウト/` | 壊れているとみなす文言 |
+| `CHECK_BLANK` | `true` | 真っ白を異常とみなすか |
+| `INTERVAL_MINUTES` | `0` | 0 以外にすると定期リロードも行う |
 
 ### インストール
 
-**起動オプションでは入れられない**（後述）。プロファイルに 1 回だけ手動で入れる。
+**起動オプション（`--load-extension`）では入れられない。** プロファイルに 1 回だけ手動で入れる。
+
+1. いつもの Chrome で `chrome://extensions` を開く
+2. 右上の「デベロッパーモード」を ON
+3. 「パッケージ化されていない拡張機能を読み込む」で `auto-reload-extension` フォルダを選ぶ
+
+以降そのプロファイルで有効。方式 B（専用プロファイル）で使いたい場合は、そのプロファイルで Chrome を開いてから同じ手順を踏む。
 
 ```powershell
 & "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" --user-data-dir="$env:LOCALAPPDATA\ChromeDashboard"
 ```
 
-1. 上のように対象プロファイルで Chrome を開く
-2. `chrome://extensions` でデベロッパーモードを ON
-3. 「パッケージ化されていない拡張機能を読み込む」で `auto-reload-extension` フォルダを選ぶ
+### 検証済みの範囲
 
-以降はこのプロファイルで起動するかぎり有効。
+`reload.js` の中身は、CDP でページに注入して実測した。
 
-### 実測できていない点
+- エラー文言のあるページ → **3 秒でリロード**
+- 正常なページ → **45 秒間リロードなし**（誤検知なし）
 
-`--load-extension` が塞がれていて自動テストに載せられないため、**手動インストール後の動作は未検証**。`--app` ウィンドウでもコンテンツスクリプトが動くのは Chrome の通常挙動だが、この repo の他の記述と違ってここだけは実測の裏付けが無い。
+ただし**拡張機能として手動インストールした状態は未検証**。`--load-extension` が塞がれており自動テストに載せられないため。`--app` ウィンドウでコンテンツスクリプトが動くこと自体は Chrome の通常挙動だが、ここだけは実測の裏付けが無い。
 
 ---
 

@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Auto Reload",
-  "version": "1.0.0",
-  "description": "Reload the matched pages on a fixed interval.",
+  "version": "2.0.0",
+  "description": "Reload the matched pages when an error appears on screen.",
   "content_scripts": [
     {
       "matches": ["https://example.com/*"],
-      "js": ["reload.js"]
+      "js": ["reload.js"],
+      "run_at": "document_idle"
     }
   ]
 }
