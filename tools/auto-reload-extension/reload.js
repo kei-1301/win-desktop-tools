@@ -1,4 +1,5 @@
-// Watch this page and reload it when the screen shows an error.
+// Watch this page, reload it when the screen shows an error, and slowly scroll
+// through it so content below the fold is visible on an unattended display.
 //
 // This exists so the dashboard can run in your everyday Chrome profile. The
 // DevTools-based watcher (split-chrome.ps1) needs --remote-debugging-port, which
@@ -41,6 +42,19 @@ const INTERVAL_MINUTES = 0;
 // Doubles while the error persists so an outage is not hammered forever.
 const BASE_GRACE_MS = 30 * 1000;
 const MAX_GRACE_MS = 600 * 1000;
+
+// ---- auto scroll ----------------------------------------------------------
+
+// Creep down the page so anything below the fold gets seen, pause at the
+// bottom, then jump back to the top and repeat. Pages that fit on screen are
+// left alone. Speed is STEP_PX every INTERVAL_MS: the defaults work out to
+// about 33 px per second, slow enough to read.
+const SCROLL_ENABLED = true;
+const SCROLL_STEP_PX = 1;
+const SCROLL_INTERVAL_MS = 30;
+const SCROLL_BOTTOM_PAUSE_MS = 3000;
+// Also hold still briefly after jumping back, so the top does not flash past.
+const SCROLL_TOP_PAUSE_MS = 1000;
 
 // ---- state carried across reloads -----------------------------------------
 
@@ -110,8 +124,45 @@ function check() {
   reloadNow(state, reason);
 }
 
+// ---- scrolling ------------------------------------------------------------
+
+let scrollHoldUntil = 0;
+
+function maxScrollTop() {
+  const doc = document.documentElement;
+  const body = document.body;
+  // Either element may be the scrolling one depending on the document's quirks
+  // mode, so take whichever reports more.
+  const height = Math.max(
+    doc ? doc.scrollHeight : 0,
+    body ? body.scrollHeight : 0
+  );
+  return height - window.innerHeight;
+}
+
+function step() {
+  if (document.readyState !== "complete") return;
+  if (Date.now() < scrollHoldUntil) return;
+
+  const limit = maxScrollTop();
+  // Short pages, and pages whose content has not loaded yet, are left alone.
+  if (limit <= 1) return;
+
+  // Compare with a small tolerance: fractional device pixel ratios mean scrollY
+  // can settle just under the limit and never equal it exactly.
+  if (window.scrollY >= limit - 1) {
+    scrollHoldUntil = Date.now() + SCROLL_BOTTOM_PAUSE_MS + SCROLL_TOP_PAUSE_MS;
+    setTimeout(() => window.scrollTo(0, 0), SCROLL_BOTTOM_PAUSE_MS);
+    return;
+  }
+
+  window.scrollBy(0, SCROLL_STEP_PX);
+}
+
 // No initial grace period: a page that is already broken when the window opens
 // should be reloaded at the first check, not one BASE_GRACE_MS later. Loading
 // pages are excluded by the readyState guard, and repeated failures still back
 // off, so nothing here can spin.
 setInterval(check, CHECK_INTERVAL_MS);
+
+if (SCROLL_ENABLED) setInterval(step, SCROLL_INTERVAL_MS);
