@@ -16,8 +16,17 @@
 
 const CHECK_INTERVAL_MS = 3000;
 
-// Text that means "this page is broken".
-const ERROR_PATTERN = /Error|ERROR|Exception|エラー|失敗|タイムアウト/;
+// Text that means "this page is broken". The /i is deliberate: without it a
+// lowercase "an error occurred" slips through, while split-chrome.ps1 catches it
+// (PowerShell's -match ignores case), and the two would disagree.
+//
+// Note what is NOT covered: Chrome's own network error screen says
+// "このサイトにアクセスできません" / "DNS_PROBE_FINISHED_NXDOMAIN" and contains
+// none of these words -- and a content script is not injected into it anyway,
+// since chrome-error:// pages are off limits to extensions. Add server-side
+// wordings your system actually shows.
+const ERROR_PATTERN =
+  /error|exception|ERR_|DNS_PROBE|Bad Gateway|Service Unavailable|エラー|失敗|タイムアウト|アクセスできません/i;
 
 // Treat a page with no visible text as broken (blank / hung screen).
 const CHECK_BLANK = true;
